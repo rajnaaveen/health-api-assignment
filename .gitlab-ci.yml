@@ -1,0 +1,156 @@
+# ============================================================
+# GitLab CI/CD Pipeline for HealthDetailApplication
+# ============================================================
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+  BUILD_VERSION: "$CI_COMMIT_SHORT_SHA"   # Injects git commit SHA as build version
+  JAR_NAME: "healthdetail-0.0.1-SNAPSHOT.jar"
+
+# Cache Maven dependencies across pipeline runs to speed up builds
+cache:
+  paths:
+    - .m2/repository
+
+# ── Pipeline Stages ──────────────────────────────────────────
+stages:
+  - build
+  - test
+  - package
+  - security     # Optional: uncomment Veracode job below to activate
+  - deploy       # Optional: uncomment AWS job below to activate
+
+# ============================================================
+# STAGE 1 — BUILD
+# Compiles the source code without running tests
+# ============================================================
+build:
+  stage: build
+  image: maven:3.9.6-eclipse-temurin-17
+  script:
+    - echo "Building project with BUILD_VERSION=$BUILD_VERSION"
+    - mvn clean compile -DskipTests
+  only:
+    - main
+    - merge_requests
+
+# ============================================================
+# STAGE 2 — TEST
+# Runs all unit tests and generates a report
+# ============================================================
+test:
+  stage: test
+  image: maven:3.9.6-eclipse-temurin-17
+  script:
+    - echo "Running unit tests..."
+    - mvn test
+  artifacts:
+    when: always
+    reports:
+      junit: target/surefire-reports/*.xml   # GitLab reads this for test result UI
+    paths:
+      - target/surefire-reports/
+    expire_in: 7 days
+  only:
+    - main
+    - merge_requests
+
+# ============================================================
+# STAGE 3 — PACKAGE
+# Packages the app into a JAR and exposes it as a GitLab artifact
+# BUILD_VERSION is baked in via the environment variable
+# ============================================================
+package:
+  stage: package
+  image: maven:3.9.6-eclipse-temurin-17
+  script:
+    - echo "Packaging JAR with BUILD_VERSION=$BUILD_VERSION"
+    - mvn package -DskipTests -DBUILD_VERSION=$BUILD_VERSION
+  artifacts:
+    name: "healthdetail-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - target/*.jar        # The JAR is stored as a downloadable GitLab artifact
+    expire_in: 30 days
+  only:
+    - main
+
+# ============================================================
+# STAGE 4 — SECURITY SCANNING (Veracode)
+#
+# HOW TO ADD VERACODE:
+# 1. Store your Veracode API credentials in GitLab:
+#    Settings → CI/CD → Variables
+#    Add: VERACODE_API_ID and VERACODE_API_KEY
+#
+# 2. Veracode scans the packaged JAR using their Pipeline Scanner.
+#    The scanner is downloaded fresh each run (official approach).
+#
+# 3. 'allow_failure: true' means a scan finding won't block deployment.
+#    Set to 'false' to enforce a security gate (recommended for production).
+#
+# 4. You can also add SAST using GitLab's built-in free scanner:
+#    Just include the template below (no Veracode account needed):
+#    include:
+#      - template: Security/SAST.gitlab-ci.yml
+# ============================================================
+# veracode_scan:
+#   stage: security
+#   image: maven:3.9.6-eclipse-temurin-17
+#   script:
+#     - echo "Running Veracode security scan..."
+#     - curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+#     - unzip pipeline-scan-LATEST.zip pipeline-scan.jar
+#     - java -jar pipeline-scan.jar
+#         --veracode_api_id "$VERACODE_API_ID"
+#         --veracode_api_key "$VERACODE_API_KEY"
+#         --file "target/$JAR_NAME"
+#         --fail_on_severity="Very High, High"
+#   allow_failure: true
+#   only:
+#     - main
+
+# ============================================================
+# STAGE 5 — DEPLOY TO AWS
+#
+# HOW TO ADD AWS DEPLOYMENT:
+# 1. Store AWS credentials in GitLab:
+#    Settings → CI/CD → Variables
+#    Add: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
+#
+# 2. Choose your deployment target:
+#
+#    Option A — AWS Elastic Beanstalk (simplest):
+#      - Zips the JAR and uploads it to S3
+#      - Creates a new Beanstalk application version
+#      - Triggers environment update (rolling deploy)
+#
+#    Option B — AWS ECS (containerized):
+#      - Build a Docker image from the JAR
+#      - Push to Amazon ECR (Elastic Container Registry)
+#      - Update the ECS service to use the new image
+#      - ECS handles rolling update with zero downtime
+#
+#    Option C — AWS EC2 (direct):
+#      - SCP the JAR to your EC2 instance
+#      - SSH in and restart the systemd service
+#
+# 3. The job below shows Option A (Elastic Beanstalk) as an example.
+# ============================================================
+# deploy_to_aws:
+#   stage: deploy
+#   image: python:3.12-slim
+#   before_script:
+#     - pip install awscli --quiet
+#     - echo "Deploying BUILD_VERSION=$BUILD_VERSION to AWS Elastic Beanstalk"
+#   script:
+#     - aws s3 cp target/$JAR_NAME s3://your-s3-bucket/$JAR_NAME
+#     - aws elasticbeanstalk create-application-version
+#         --application-name "HealthDetailApplication"
+#         --version-label "$BUILD_VERSION"
+#         --source-bundle S3Bucket="your-s3-bucket",S3Key="$JAR_NAME"
+#     - aws elasticbeanstalk update-environment
+#         --environment-name "healthdetail-prod"
+#         --version-label "$BUILD_VERSION"
+#   only:
+#     - main
+#   when: manual    # Requires a human to click Deploy in GitLab UI
